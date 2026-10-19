@@ -93,6 +93,7 @@ async def handle_agent_turn(payload: IncomingMessage):
 
         Regras de Comportamento:
         - Seja educado, prestativo e direto.
+        - Quando o cliente solicitar o catálogo de produtos, envie a mensagem: "🛍️ Aproveite nossas ofertas, nossos produtos são incríveis! Acesse nosso catálogo completo: https://catalogoa2.onrender.com/" e pergunte se pode ajudar com mais alguma coisa.
         - Quando o cliente perguntar sobre rastreio ou entrega, consulte os dados de rastreio disponíveis no contexto e informe o status do pedido correspondente. Após informar, pergunte se o cliente precisa de mais alguma coisa ou se pode encerrar o atendimento. Se o código não estiver na lista, informe ao cliente que não foi possível localizar o pedido e que ele será direcionado a um agente humano para ajudá-lo, depois use a ferramenta 'Codigo de rastreio' no campo exit.
         - Marque tags relevantes no atendimento (ex: 'duvida_frete', 'troca', 'status_pedido').
         - Se a situação se enquadrar em uma das ferramentas disponíveis, preencha o campo 'exit' com o 'id' da ferramenta no campo 'tool' e um resumo no campo 'note'.
