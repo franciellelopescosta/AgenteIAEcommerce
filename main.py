@@ -1,4 +1,5 @@
 import os
+import traceback
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
@@ -26,7 +27,6 @@ class IncomingMessage(BaseModel):
 
 class AgentResponse(BaseModel):
     messages: List[str] = Field(description="Lista de mensagens de texto para enviar ao contato")
-    variables_to_save: Optional[Dict[str, Any]] = Field(default={}, description="Variáveis para atualizar no fluxo")
     tags_to_add: Optional[List[str]] = Field(default=[], description="Tags para marcar no atendimento")
     action: Optional[str] = Field(default=None, description="Ação de saída: 'next_block', 'transfer_queue', 'transfer_flow', 'close', ou null para continuar conversando")
     action_target: Optional[str] = Field(default=None, description="Nome ou ID da fila/fluxo destino, caso haja transferência")
@@ -87,6 +87,7 @@ async def handle_agent_turn(payload: IncomingMessage):
         return result_data
 
     except Exception as e:
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/")
