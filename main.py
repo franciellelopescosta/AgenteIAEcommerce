@@ -87,7 +87,7 @@ async def handle_agent_turn(payload: IncomingMessage):
         for attempt in range(max_retries):
             try:
                 response = client.models.generate_content(
-                    model="gemini-1.5-flash",
+                    model="gemini-2.5-flash",
                     contents=user_prompt,
                     config=types.GenerateContentConfig(
                         system_instruction=system_instruction,
