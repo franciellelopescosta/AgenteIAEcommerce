@@ -72,16 +72,31 @@ async def handle_agent_turn(payload: IncomingMessage):
         Nova Mensagem do Contato: {user_message}
         """
 
-        response = client.models.generate_content(
-            model='gemini-3.8-flash',
-            contents=user_prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                response_mime_type="application/json",
-                response_schema=AgentResponse,
-                temperature=0.4,
-            ),
-        )
+        # Tenta chamar a API do Gemini até 3 vezes em caso de instabilidade (503)
+        max_retries = 3
+        response = None
+        last_error = None
+
+        for attempt in range(max_retries):
+            try:
+                response = client.models.generate_content(
+                    model='gemini-2.5-flash',  # Pode manter o flash ou pro
+                    contents=user_prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        response_mime_type="application/json",
+                        response_schema=AgentResponse,
+                        temperature=0.4,
+                    ),
+                )
+                break 
+            except Exception as api_err:
+                last_error = api_err
+                if attempt == max_retries - 1:
+                    raise api_err
+
+        if not response:
+            raise HTTPException(status_code=500, detail=str(last_error))
 
         result_data = json.loads(response.text)
         return result_data
