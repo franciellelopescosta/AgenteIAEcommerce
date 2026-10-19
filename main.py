@@ -123,7 +123,7 @@ async def handle_agent_turn(payload: IncomingMessage):
         # Converte messages de List[str] para o formato esperado pela Vonix: {type, text, media}
         if "messages" in result_data and isinstance(result_data["messages"], list):
             result_data["messages"] = [
-                {"type": "text", "text": msg, "media": None}
+                {"type": "TEXT", "text": msg, "media": None}
                 for msg in result_data["messages"]
             ]
 
