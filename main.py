@@ -81,7 +81,7 @@ async def handle_agent_turn(payload: IncomingMessage):
         Nova Mensagem do Contato: {user_message}
         """
 
-        models_to_try = ['gemini-3.8-flash', 'gemini-2.0-flash']
+        models_to_try = ['gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite']
         max_retries = 3
         response = None
         last_error = None
