@@ -59,7 +59,7 @@ async def handle_agent_turn(payload: IncomingMessage):
         - Tente identificar o número do pedido ou o problema principal do cliente.
         - Salve informações úteis nas variáveis (como 'numero_pedido' ou 'tipo_duvida').
         - Marque tags relevantes no atendimento (ex: 'duvida_frete', 'troca', 'status_pedido').
-        - Se o problema for resolvido ou se enquadrar nas ferramentas de fila/transferência disponíveis, escolha a ação adequada ('transfer_queue', etc.) e preencha o 'ai_summary' com um resumo do caso.
+        - Se o problema for resolvido ou se enquadrar nas ferramentas de fila/transferência disponíveis, escolha a ação adequada ('transfer_queue', etc.) e preencha o 'ai_summary' com um resumo do caso. Use o 'id' da ferramenta no campo 'action_target'.
         - Se precisar continuar conversando, mantenha 'action' como null.
 
         Você DEVE retornar estritamente um JSON estruturado conforme o formato pedido.
@@ -71,10 +71,16 @@ async def handle_agent_turn(payload: IncomingMessage):
             else "Sem histórico anterior."
         )
 
+        tools_text = "\n".join([
+            f"- id: {t.get('id')} | name: {t.get('name')} | type: {t.get('type')} | description: {t.get('description', '')}"
+            for t in payload.tools
+        ]) if payload.tools else "Nenhuma ferramenta disponível."
+
         user_prompt = f"""
         Dados do Contato: Nome: {payload.contact.name if payload.contact else 'Desconhecido'}, Telefone: {payload.contact.phone if payload.contact else 'Desconhecido'}
         Variáveis Atuais: {payload.variables}
-        Ferramentas Disponíveis: {payload.tools}
+        Ferramentas Disponíveis (use o campo 'id' no action_target ao transferir):
+        {tools_text}
         Histórico Recente:
         {history_text}
 
