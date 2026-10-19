@@ -57,7 +57,7 @@ async def handle_agent_turn(payload: IncomingMessage):
         """
 
         response = client.models.generate_content(
-            model='gemini-3.8-flash',  # Atualizado para o modelo atual
+            model='gemini-2.5-flash',
             contents=user_prompt,
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
