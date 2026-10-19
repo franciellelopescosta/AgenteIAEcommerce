@@ -6,6 +6,8 @@ from typing import List, Optional, Dict, Any
 from google import genai
 from google.genai import types
 import json
+import time
+
 
 app = FastAPI(title="Fake Atendimento E-commerce Agent")
 
@@ -79,15 +81,14 @@ async def handle_agent_turn(payload: IncomingMessage):
         Nova Mensagem do Contato: {user_message}
         """
 
-        # Tenta chamar a API do Gemini até 3 vezes em caso de instabilidade
-        max_retries = 3
+        max_retries = 5
         response = None
         last_error = None
 
         for attempt in range(max_retries):
             try:
                 response = client.models.generate_content(
-                    model='gemini-3.8-flash',
+                    model='gemini-2.5-flash',
                     contents=user_prompt,
                     config=types.GenerateContentConfig(
                         system_instruction=system_instruction,
@@ -96,10 +97,13 @@ async def handle_agent_turn(payload: IncomingMessage):
                         temperature=0.4,
                     ),
                 )
-                break
+                break  # Sucesso! Sai do loop imediatamente
             except Exception as api_err:
                 last_error = api_err
-                if attempt == max_retries - 1:
+                if attempt < max_retries - 1:
+                    # Pausa progressiva: 1s, 2s, 3s, 4s...
+                    time.sleep(attempt + 1)
+                else:
                     raise api_err
 
         if not response:
