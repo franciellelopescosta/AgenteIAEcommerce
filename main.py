@@ -81,34 +81,39 @@ async def handle_agent_turn(payload: IncomingMessage):
         Nova Mensagem do Contato: {user_message}
         """
 
-        max_retries = 5
+        models_to_try = ['gemini-3.8-flash', 'gemini-2.0-flash']
+        max_retries = 3
         response = None
         last_error = None
 
-        for attempt in range(max_retries):
-            try:
-                response = client.models.generate_content(
-                    model='gemini-3.8-flash',
-                    contents=user_prompt,
-                    config=types.GenerateContentConfig(
-                        system_instruction=system_instruction,
-                        response_mime_type="application/json",
-                        response_schema=AgentResponse,
-                        temperature=0.4,
-                    ),
-                )
-                break  # Sucesso! Sai do loop imediatamente
-            except Exception as api_err:
-                last_error = api_err
-                error_str = str(api_err)
-                # Só faz retry em erros temporários (503 overload); erros permanentes falham imediatamente
-                is_retryable = "503" in error_str or "UNAVAILABLE" in error_str or "overloaded" in error_str.lower()
-                if is_retryable and attempt < max_retries - 1:
-                    delay = (2 ** attempt) * 2  # backoff exponencial: 2s, 4s, 8s, 16s
-                    print(f"[retry] attempt {attempt + 1}/{max_retries} failed with 503, waiting {delay}s...")
-                    time.sleep(delay)
-                else:
-                    raise api_err
+        for model_name in models_to_try:
+            for attempt in range(max_retries):
+                try:
+                    print(f"[gemini] calling {model_name}, attempt {attempt + 1}/{max_retries}")
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=user_prompt,
+                        config=types.GenerateContentConfig(
+                            system_instruction=system_instruction,
+                            response_mime_type="application/json",
+                            response_schema=AgentResponse,
+                            temperature=0.4,
+                        ),
+                    )
+                    break  # Sucesso, sai do loop de tentativas
+                except Exception as api_err:
+                    last_error = api_err
+                    error_str = str(api_err)
+                    is_retryable = "503" in error_str or "UNAVAILABLE" in error_str
+                    if is_retryable and attempt < max_retries - 1:
+                        delay = (2 ** attempt) * 2  # 2s, 4s
+                        print(f"[retry] {model_name} attempt {attempt + 1} failed with 503, waiting {delay}s...")
+                        time.sleep(delay)
+                    else:
+                        print(f"[fallback] {model_name} failed: {error_str[:100]}")
+                        break  # Tenta o próximo modelo
+            if response:
+                break  # Tem resposta, não precisa tentar o próximo modelo
 
         if not response:
             raise HTTPException(status_code=500, detail=str(last_error))
