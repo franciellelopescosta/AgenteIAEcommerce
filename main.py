@@ -140,10 +140,12 @@ async def handle_agent_turn(payload: IncomingMessage):
         result_data = json.loads(response.text)
 
         # Converte messages de List[str] para o formato esperado pela Vonix: {type, text}
+        # Filtra mensagens vazias para evitar erro "text.body is required" no WhatsApp
         if "messages" in result_data and isinstance(result_data["messages"], list):
             result_data["messages"] = [
                 {"type": "TEXT", "text": msg}
                 for msg in result_data["messages"]
+                if msg and msg.strip()
             ]
 
         return result_data
