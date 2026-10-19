@@ -38,7 +38,7 @@ class AgentResponse(BaseModel):
     ai_summary: Optional[str] = Field(default=None, description="Resumo obrigatório se for transferir ou encerrar")
 
 
-@app.post("/webhook/ia", response_model=AgentResponse)
+@app.post("/webhook/ia")
 async def handle_agent_turn(payload: IncomingMessage):
     try:
         # Extrai o texto da mensagem independentemente de vir em 'message', 'text' ou 'messages'
@@ -119,6 +119,14 @@ async def handle_agent_turn(payload: IncomingMessage):
             raise HTTPException(status_code=500, detail=str(last_error))
 
         result_data = json.loads(response.text)
+
+        # Converte messages de List[str] para o formato esperado pela Vonix: {type, text, media}
+        if "messages" in result_data and isinstance(result_data["messages"], list):
+            result_data["messages"] = [
+                {"type": "text", "text": msg, "media": None}
+                for msg in result_data["messages"]
+            ]
+
         return result_data
 
     except Exception as e:
