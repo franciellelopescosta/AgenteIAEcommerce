@@ -1,5 +1,6 @@
 import os
 import traceback
+import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
@@ -12,6 +13,8 @@ import time
 app = FastAPI(title="Fake Atendimento E-commerce Agent")
 
 client = genai.Client()
+
+RASTREIO_API_URL = "https://api-frases-teste.onrender.com/retornorastreios"
 
 
 class Contact(BaseModel):
@@ -47,6 +50,28 @@ class GeminiAgentResponse(BaseModel):
     exit: Optional[GeminiExit] = Field(default=None, description="Saída do bloco. Null para continuar conversando")
 
 
+async def buscar_rastreios() -> str:
+    """Consulta a API de rastreios e retorna os dados formatados como texto."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as http:
+            resp = await http.get(RASTREIO_API_URL)
+            if resp.status_code == 200:
+                data = resp.json()
+                rastreios = data.get("rastreios", [])
+                if not rastreios:
+                    return "Nenhum rastreio disponível no momento."
+                linhas = []
+                for r in rastreios:
+                    linhas.append(
+                        f"- Código: {r['numero_rastreio']} | Produto: {r['produto']} | "
+                        f"Status: {r['status']} | Previsão de entrega: {r['previsao_entrega']}"
+                    )
+                return "\n".join(linhas)
+            return "Serviço de rastreio indisponível no momento."
+    except Exception:
+        return "Serviço de rastreio indisponível no momento."
+
+
 @app.post("/webhook/ia")
 async def handle_agent_turn(payload: IncomingMessage):
     try:
@@ -59,14 +84,16 @@ async def handle_agent_turn(payload: IncomingMessage):
         if not user_message:
             user_message = "Olá"
 
+        # Consulta os rastreios para incluir no contexto do agente
+        rastreios_info = await buscar_rastreios()
+
         system_instruction = """
         Você é o assistente virtual de atendimento da 'Fake Atendimento E-commerce', uma loja virtual genérica.
         Seu objetivo é ajudar os clientes com dúvidas sobre produtos, prazos de entrega, status de pedidos, trocas e devoluções.
 
         Regras de Comportamento:
         - Seja educado, prestativo e direto.
-        - Tente identificar o número do pedido ou o problema principal do cliente.
-        - Salve informações úteis nas variáveis permitidas (return_variables).
+        - Quando o cliente perguntar sobre rastreio ou entrega, consulte os dados de rastreio disponíveis no contexto e informe o status do pedido correspondente. Se o código não estiver na lista, use a ferramenta 'Codigo de rastreio'.
         - Marque tags relevantes no atendimento (ex: 'duvida_frete', 'troca', 'status_pedido').
         - Se a situação se enquadrar em uma das ferramentas disponíveis, preencha o campo 'exit' com o 'id' da ferramenta no campo 'tool' e um resumo no campo 'note'.
         - Se precisar continuar conversando, mantenha 'exit' como null.
@@ -91,9 +118,10 @@ async def handle_agent_turn(payload: IncomingMessage):
         user_prompt = f"""
         Dados do Contato: Nome: {payload.contact.name if payload.contact else 'Desconhecido'}, Telefone: {payload.contact.phone if payload.contact else 'Desconhecido'}
         Variáveis Atuais: {payload.variables}
-        Variáveis que posso salvar: {payload.return_variables}
         Ferramentas Disponíveis (use o 'id' da ferramenta no campo exit.tool):
         {tools_text}
+        Dados de Rastreio Disponíveis:
+        {rastreios_info}
         Histórico Recente:
         {history_text}
 
