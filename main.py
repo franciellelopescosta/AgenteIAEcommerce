@@ -43,7 +43,6 @@ class GeminiExit(BaseModel):
 
 class GeminiAgentResponse(BaseModel):
     messages: List[str] = Field(description="Lista de textos para enviar ao contato")
-    variables: Optional[Dict[str, str]] = Field(default={}, description="Variáveis a salvar (apenas as listadas em return_variables)")
     tags: Optional[List[str]] = Field(default=[], description="Tags para marcar no atendimento")
     exit: Optional[GeminiExit] = Field(default=None, description="Saída do bloco. Null para continuar conversando")
 
