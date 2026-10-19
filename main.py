@@ -100,9 +100,13 @@ async def handle_agent_turn(payload: IncomingMessage):
                 break  # Sucesso! Sai do loop imediatamente
             except Exception as api_err:
                 last_error = api_err
-                if attempt < max_retries - 1:
-                    # Pausa progressiva: 1s, 2s, 3s, 4s...
-                    time.sleep(attempt + 1)
+                error_str = str(api_err)
+                # Só faz retry em erros temporários (503 overload); erros permanentes falham imediatamente
+                is_retryable = "503" in error_str or "UNAVAILABLE" in error_str or "overloaded" in error_str.lower()
+                if is_retryable and attempt < max_retries - 1:
+                    delay = (2 ** attempt) * 2  # backoff exponencial: 2s, 4s, 8s, 16s
+                    print(f"[retry] attempt {attempt + 1}/{max_retries} failed with 503, waiting {delay}s...")
+                    time.sleep(delay)
                 else:
                     raise api_err
 
