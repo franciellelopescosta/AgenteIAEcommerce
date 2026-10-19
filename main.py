@@ -11,10 +11,12 @@ app = FastAPI(title="Fake Atendimento E-commerce Agent")
 
 client = genai.Client()
 
+
 class Contact(BaseModel):
     name: Optional[str] = None
     phone: Optional[str] = None
     user_id: Optional[str] = None
+
 
 class IncomingMessage(BaseModel):
     contact: Optional[Contact] = None
@@ -25,6 +27,7 @@ class IncomingMessage(BaseModel):
     messages: Optional[List[Dict[str, Any]]] = Field(default=[], description="Lista de mensagens da Vonix")
     tools: Optional[List[Dict[str, Any]]] = Field(default=[], description="Ferramentas disponíveis")
 
+
 class AgentResponse(BaseModel):
     messages: List[str] = Field(description="Lista de mensagens de texto para enviar ao contato")
     tags_to_add: Optional[List[str]] = Field(default=[], description="Tags para marcar no atendimento")
@@ -32,23 +35,23 @@ class AgentResponse(BaseModel):
     action_target: Optional[str] = Field(default=None, description="Nome ou ID da fila/fluxo destino, caso haja transferência")
     ai_summary: Optional[str] = Field(default=None, description="Resumo obrigatório se for transferir ou encerrar")
 
+
 @app.post("/webhook/ia", response_model=AgentResponse)
 async def handle_agent_turn(payload: IncomingMessage):
     try:
         # Extrai o texto da mensagem independentemente de vir em 'message', 'text' ou 'messages'
         user_message = payload.message or payload.text
         if not user_message and payload.messages:
-            # Pega o texto da última mensagem se a lista não estiver vazia
             last_msg = payload.messages[-1]
             user_message = last_msg.get("text", "")
-            
+
         if not user_message:
             user_message = "Olá"
 
         system_instruction = """
         Você é o assistente virtual de atendimento da 'Fake Atendimento E-commerce', uma loja virtual genérica.
         Seu objetivo é ajudar os clientes com dúvidas sobre produtos, prazos de entrega, status de pedidos, trocas e devoluções.
-        
+
         Regras de Comportamento:
         - Seja educado, prestativo e direto.
         - Tente identificar o número do pedido ou o problema principal do cliente.
@@ -56,21 +59,27 @@ async def handle_agent_turn(payload: IncomingMessage):
         - Marque tags relevantes no atendimento (ex: 'duvida_frete', 'troca', 'status_pedido').
         - Se o problema for resolvido ou se enquadrar nas ferramentas de fila/transferência disponíveis, escolha a ação adequada ('transfer_queue', etc.) e preencha o 'ai_summary' com um resumo do caso.
         - Se precisar continuar conversando, mantenha 'action' como null.
-        
+
         Você DEVE retornar estritamente um JSON estruturado conforme o formato pedido.
         """
 
-        history_text = "\n".join([f"{h.get('role', 'user')}: {h.get('content', '')}" for h in payload.history]) if payload.history else "Sem histórico anterior."
-        
+        history_text = (
+            "\n".join([f"{h.get('role', 'user')}: {h.get('content', '')}" for h in payload.history])
+            if payload.history
+            else "Sem histórico anterior."
+        )
+
         user_prompt = f"""
         Dados do Contato: Nome: {payload.contact.name if payload.contact else 'Desconhecido'}, Telefone: {payload.contact.phone if payload.contact else 'Desconhecido'}
         Variáveis Atuais: {payload.variables}
         Ferramentas Disponíveis: {payload.tools}
         Histórico Recente:
         {history_text}
-        
+
         Nova Mensagem do Contato: {user_message}
         """
+
+        # Tenta chamar a API do Gemini até 3 vezes em caso de instabilidade
         max_retries = 3
         response = None
         last_error = None
@@ -78,7 +87,7 @@ async def handle_agent_turn(payload: IncomingMessage):
         for attempt in range(max_retries):
             try:
                 response = client.models.generate_content(
-                    model='gemini-1.5-flash',  # Usando o 1.5-flash que é universal e estável
+                    model="gemini-1.5-flash",
                     contents=user_prompt,
                     config=types.GenerateContentConfig(
                         system_instruction=system_instruction,
@@ -102,6 +111,7 @@ async def handle_agent_turn(payload: IncomingMessage):
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/")
 def health_check():
