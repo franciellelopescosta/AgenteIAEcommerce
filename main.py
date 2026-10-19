@@ -21,28 +21,38 @@ class Contact(BaseModel):
 
 
 class IncomingMessage(BaseModel):
+    turn_id: Optional[str] = None
+    chat_id: Optional[int] = None
+    node_id: Optional[str] = None
+    channel: Optional[str] = None
+    is_test: Optional[bool] = False
     contact: Optional[Contact] = None
-    history: Optional[List[Dict[str, Any]]] = []
+    text: Optional[str] = Field(default="", description="Textos do turno unidos por quebra de linha")
+    messages: Optional[List[Dict[str, Any]]] = Field(default=[], description="Mensagens novas do contato neste turno")
+    history: Optional[List[Dict[str, Any]]] = Field(default=[], description="Histórico de mensagens anteriores")
     variables: Optional[Dict[str, Any]] = {}
-    message: Optional[str] = Field(default="", description="Mensagem de texto direta")
-    text: Optional[str] = Field(default="", description="Texto enviado pela Vonix")
-    messages: Optional[List[Dict[str, Any]]] = Field(default=[], description="Lista de mensagens da Vonix")
-    tools: Optional[List[Dict[str, Any]]] = Field(default=[], description="Ferramentas disponíveis")
+    return_variables: Optional[List[str]] = Field(default=[], description="Variáveis que o agente pode gravar")
+    tools: Optional[List[Dict[str, Any]]] = Field(default=[], description="Saídas permitidas neste turno")
 
 
-class AgentResponse(BaseModel):
-    messages: List[str] = Field(description="Lista de mensagens de texto para enviar ao contato")
-    tags_to_add: Optional[List[str]] = Field(default=[], description="Tags para marcar no atendimento")
-    action: Optional[str] = Field(default=None, description="Ação de saída: 'next_block', 'transfer_queue', 'transfer_flow', 'close', ou null para continuar conversando")
-    action_target: Optional[str] = Field(default=None, description="Nome ou ID da fila/fluxo destino, caso haja transferência")
-    ai_summary: Optional[str] = Field(default=None, description="Resumo obrigatório se for transferir ou encerrar")
+# Schema interno usado pelo Gemini para gerar a resposta estruturada
+class GeminiExit(BaseModel):
+    tool: Optional[str] = Field(default=None, description="ID da ferramenta de saída (tool.id)")
+    note: Optional[str] = Field(default=None, description="Resumo do caso para transferência ou encerramento")
+
+
+class GeminiAgentResponse(BaseModel):
+    messages: List[str] = Field(description="Lista de textos para enviar ao contato")
+    variables: Optional[Dict[str, str]] = Field(default={}, description="Variáveis a salvar (apenas as listadas em return_variables)")
+    tags: Optional[List[str]] = Field(default=[], description="Tags para marcar no atendimento")
+    exit: Optional[GeminiExit] = Field(default=None, description="Saída do bloco. Null para continuar conversando")
 
 
 @app.post("/webhook/ia")
 async def handle_agent_turn(payload: IncomingMessage):
     try:
-        # Extrai o texto da mensagem independentemente de vir em 'message', 'text' ou 'messages'
-        user_message = payload.message or payload.text
+        # Extrai o texto da mensagem do campo text ou da última mensagem da lista
+        user_message = payload.text
         if not user_message and payload.messages:
             last_msg = payload.messages[-1]
             user_message = last_msg.get("text", "")
@@ -57,16 +67,19 @@ async def handle_agent_turn(payload: IncomingMessage):
         Regras de Comportamento:
         - Seja educado, prestativo e direto.
         - Tente identificar o número do pedido ou o problema principal do cliente.
-        - Salve informações úteis nas variáveis (como 'numero_pedido' ou 'tipo_duvida').
+        - Salve informações úteis nas variáveis permitidas (return_variables).
         - Marque tags relevantes no atendimento (ex: 'duvida_frete', 'troca', 'status_pedido').
-        - Se o problema for resolvido ou se enquadrar nas ferramentas de fila/transferência disponíveis, escolha a ação adequada ('transfer_queue', etc.) e preencha o 'ai_summary' com um resumo do caso. Use o 'id' da ferramenta no campo 'action_target'.
-        - Se precisar continuar conversando, mantenha 'action' como null.
+        - Se a situação se enquadrar em uma das ferramentas disponíveis, preencha o campo 'exit' com o 'id' da ferramenta no campo 'tool' e um resumo no campo 'note'.
+        - Se precisar continuar conversando, mantenha 'exit' como null.
 
         Você DEVE retornar estritamente um JSON estruturado conforme o formato pedido.
         """
 
         history_text = (
-            "\n".join([f"{h.get('role', 'user')}: {h.get('content', '')}" for h in payload.history])
+            "\n".join([
+                f"{h.get('role', 'contact')}: {h.get('text') or h.get('content', '')}"
+                for h in payload.history
+            ])
             if payload.history
             else "Sem histórico anterior."
         )
@@ -79,7 +92,8 @@ async def handle_agent_turn(payload: IncomingMessage):
         user_prompt = f"""
         Dados do Contato: Nome: {payload.contact.name if payload.contact else 'Desconhecido'}, Telefone: {payload.contact.phone if payload.contact else 'Desconhecido'}
         Variáveis Atuais: {payload.variables}
-        Ferramentas Disponíveis (use o campo 'id' no action_target ao transferir):
+        Variáveis que posso salvar: {payload.return_variables}
+        Ferramentas Disponíveis (use o 'id' da ferramenta no campo exit.tool):
         {tools_text}
         Histórico Recente:
         {history_text}
@@ -102,7 +116,7 @@ async def handle_agent_turn(payload: IncomingMessage):
                         config=types.GenerateContentConfig(
                             system_instruction=system_instruction,
                             response_mime_type="application/json",
-                            response_schema=AgentResponse,
+                            response_schema=GeminiAgentResponse,
                             temperature=0.4,
                         ),
                     )
@@ -119,17 +133,17 @@ async def handle_agent_turn(payload: IncomingMessage):
                         print(f"[fallback] {model_name} failed: {error_str[:100]}")
                         break  # Tenta o próximo modelo
             if response:
-                break  # Tem resposta, não precisa tentar o próximo modelo
+                break
 
         if not response:
             raise HTTPException(status_code=500, detail=str(last_error))
 
         result_data = json.loads(response.text)
 
-        # Converte messages de List[str] para o formato esperado pela Vonix: {type, text, media}
+        # Converte messages de List[str] para o formato esperado pela Vonix: {type, text}
         if "messages" in result_data and isinstance(result_data["messages"], list):
             result_data["messages"] = [
-                {"type": "TEXT", "text": msg, "media": None}
+                {"type": "TEXT", "text": msg}
                 for msg in result_data["messages"]
             ]
 
