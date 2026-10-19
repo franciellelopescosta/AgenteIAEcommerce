@@ -80,7 +80,7 @@ async def handle_agent_turn(payload: IncomingMessage):
         for attempt in range(max_retries):
             try:
                 response = client.models.generate_content(
-                    model='gemini-2.5-flash',  # Pode manter o flash ou pro
+                    model='gemini-2.5-flash',
                     contents=user_prompt,
                     config=types.GenerateContentConfig(
                         system_instruction=system_instruction,
@@ -89,9 +89,10 @@ async def handle_agent_turn(payload: IncomingMessage):
                         temperature=0.4,
                     ),
                 )
-                break 
+                break  # Se deu certo, sai do loop imediatamente
             except Exception as api_err:
                 last_error = api_err
+                # Se ainda não chegou na última tentativa, o loop continua sozinho
                 if attempt == max_retries - 1:
                     raise api_err
 
