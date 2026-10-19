@@ -13,16 +13,20 @@ client = genai.Client()
 class Contact(BaseModel):
     name: Optional[str] = None
     phone: Optional[str] = None
+    user_id: Optional[str] = None
 
 class IncomingMessage(BaseModel):
     contact: Optional[Contact] = None
-    history: Optional[List[Dict[str, str]]] = []
+    history: Optional[List[Dict[str, Any]]] = []
     variables: Optional[Dict[str, Any]] = {}
-    message: str
+    message: Optional[str] = Field(default="", description="Mensagem de texto direta")
+    text: Optional[str] = Field(default="", description="Texto enviado pela Vonix")
+    messages: Optional[List[Dict[str, Any]]] = Field(default=[], description="Lista de mensagens da Vonix")
+    tools: Optional[List[Dict[str, Any]]] = Field(default=[], description="Ferramentas disponíveis")
 
-# Schema simplificado para o Gemini aceitar sem erros de additional_properties
 class AgentResponse(BaseModel):
     messages: List[str] = Field(description="Lista de mensagens de texto para enviar ao contato")
+    variables_to_save: Optional[Dict[str, Any]] = Field(default={}, description="Variáveis para atualizar no fluxo")
     tags_to_add: Optional[List[str]] = Field(default=[], description="Tags para marcar no atendimento")
     action: Optional[str] = Field(default=None, description="Ação de saída: 'next_block', 'transfer_queue', 'transfer_flow', 'close', ou null para continuar conversando")
     action_target: Optional[str] = Field(default=None, description="Nome ou ID da fila/fluxo destino, caso haja transferência")
@@ -31,6 +35,16 @@ class AgentResponse(BaseModel):
 @app.post("/webhook/ia", response_model=AgentResponse)
 async def handle_agent_turn(payload: IncomingMessage):
     try:
+        # Extrai o texto da mensagem independentemente de vir em 'message', 'text' ou 'messages'
+        user_message = payload.message or payload.text
+        if not user_message and payload.messages:
+            # Pega o texto da última mensagem se a lista não estiver vazia
+            last_msg = payload.messages[-1]
+            user_message = last_msg.get("text", "")
+            
+        if not user_message:
+            user_message = "Olá"
+
         system_instruction = """
         Você é o assistente virtual de atendimento da 'Fake Atendimento E-commerce', uma loja virtual genérica.
         Seu objetivo é ajudar os clientes com dúvidas sobre produtos, prazos de entrega, status de pedidos, trocas e devoluções.
@@ -38,8 +52,9 @@ async def handle_agent_turn(payload: IncomingMessage):
         Regras de Comportamento:
         - Seja educado, prestativo e direto.
         - Tente identificar o número do pedido ou o problema principal do cliente.
+        - Salve informações úteis nas variáveis (como 'numero_pedido' ou 'tipo_duvida').
         - Marque tags relevantes no atendimento (ex: 'duvida_frete', 'troca', 'status_pedido').
-        - Se o problema for resolvido ou o cliente quiser falar com um atendente humano, escolha a ação adequada para transferir para a fila de suporte humano ou encerrar o atendimento, preenchendo obrigatoriamente o 'ai_summary' com um resumo do caso.
+        - Se o problema for resolvido ou se enquadrar nas ferramentas de fila/transferência disponíveis, escolha a ação adequada ('transfer_queue', etc.) e preencha o 'ai_summary' com um resumo do caso.
         - Se precisar continuar conversando, mantenha 'action' como null.
         
         Você DEVE retornar estritamente um JSON estruturado conforme o formato pedido.
@@ -50,10 +65,11 @@ async def handle_agent_turn(payload: IncomingMessage):
         user_prompt = f"""
         Dados do Contato: Nome: {payload.contact.name if payload.contact else 'Desconhecido'}, Telefone: {payload.contact.phone if payload.contact else 'Desconhecido'}
         Variáveis Atuais: {payload.variables}
+        Ferramentas Disponíveis: {payload.tools}
         Histórico Recente:
         {history_text}
         
-        Nova Mensagem do Contato: {payload.message}
+        Nova Mensagem do Contato: {user_message}
         """
 
         response = client.models.generate_content(
