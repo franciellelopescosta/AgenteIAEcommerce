@@ -71,8 +71,6 @@ async def handle_agent_turn(payload: IncomingMessage):
         
         Nova Mensagem do Contato: {user_message}
         """
-
-        # Tenta chamar a API do Gemini até 3 vezes em caso de instabilidade (503)
         max_retries = 3
         response = None
         last_error = None
@@ -80,7 +78,7 @@ async def handle_agent_turn(payload: IncomingMessage):
         for attempt in range(max_retries):
             try:
                 response = client.models.generate_content(
-                    model='gemini-2.5-flash',
+                    model='gemini-1.5-flash',  # Usando o 1.5-flash que é universal e estável
                     contents=user_prompt,
                     config=types.GenerateContentConfig(
                         system_instruction=system_instruction,
@@ -89,10 +87,9 @@ async def handle_agent_turn(payload: IncomingMessage):
                         temperature=0.4,
                     ),
                 )
-                break  # Se deu certo, sai do loop imediatamente
+                break
             except Exception as api_err:
                 last_error = api_err
-                # Se ainda não chegou na última tentativa, o loop continua sozinho
                 if attempt == max_retries - 1:
                     raise api_err
 
