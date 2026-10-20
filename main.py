@@ -47,6 +47,7 @@ class GeminiExit(BaseModel):
 class GeminiAgentResponse(BaseModel):
     messages: List[str] = Field(description="Lista de textos para enviar ao contato")
     tags: Optional[List[str]] = Field(default=[], description="Tags para marcar no atendimento")
+    variables: Optional[Dict[str, Any]] = Field(default={}, description="Variáveis de retorno para o fluxo. Preencha com os nomes listados em return_variables.")
     exit: Optional[GeminiExit] = Field(default=None, description="Saída do bloco. Null para continuar conversando")
 
 
@@ -98,6 +99,7 @@ async def handle_agent_turn(payload: IncomingMessage):
         - Quando o cliente mencionar CEP, quiser verificar se entregamos em um endereço, ou perguntar sobre frete por localidade, informe que irá transferi-lo para o nosso assistente especializado em consulta de endereço, e use a ferramenta com name 'Agente CEP' ou similar no campo exit. Marque a tag 'consulta_cep'.
         - Marque tags relevantes no atendimento (ex: 'duvida_frete', 'troca', 'status_pedido', 'consulta_cep').
         - Se a situação se enquadrar em uma das ferramentas disponíveis, preencha o campo 'exit' com o 'id' da ferramenta no campo 'tool' e um resumo no campo 'note'.
+        - Quando houver variáveis de retorno listadas, preencha o campo 'variables' com os valores correspondentes. Por exemplo, se a variável for 'note', coloque o mesmo valor do exit.note em variables.note.
         - Se precisar continuar conversando, mantenha 'exit' como null.
 
         Você DEVE retornar estritamente um JSON estruturado conforme o formato pedido.
@@ -117,11 +119,17 @@ async def handle_agent_turn(payload: IncomingMessage):
             for t in payload.tools
         ]) if payload.tools else "Nenhuma ferramenta disponível."
 
+        return_variables_text = "\n".join([
+            f"- {v}" for v in payload.return_variables
+        ]) if payload.return_variables else "Nenhuma variável de retorno solicitada."
+
         user_prompt = f"""
         Dados do Contato: Nome: {payload.contact.name if payload.contact else 'Desconhecido'}, Telefone: {payload.contact.phone if payload.contact else 'Desconhecido'}
         Variáveis Atuais: {payload.variables}
         Ferramentas Disponíveis (use o 'id' da ferramenta no campo exit.tool):
         {tools_text}
+        Variáveis de Retorno Esperadas (preencha no campo 'variables' da resposta):
+        {return_variables_text}
         Dados de Rastreio Disponíveis:
         {rastreios_info}
         Histórico Recente:
