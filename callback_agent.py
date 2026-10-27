@@ -1,5 +1,6 @@
 import traceback
 import httpx
+import re
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Response
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
@@ -9,11 +10,11 @@ import json
 import time
 
 
-app = FastAPI(title="Agente E-commerce - Callback")
+app = FastAPI(title="Agente CEP - Callback")
 
 client = genai.Client()
 
-RASTREIO_API_URL = "https://api-frases-teste.onrender.com/retornorastreios"
+VIACEP_URL = "https://viacep.com.br/ws/{cep}/json/"
 
 
 class Contact(BaseModel):
@@ -29,8 +30,8 @@ class IncomingMessage(BaseModel):
     channel: Optional[str] = None
     is_test: Optional[bool] = False
     contact: Optional[Contact] = None
-    text: Optional[str] = Field(default="", description="Textos do turno unidos por quebra de linha")
-    messages: Optional[List[Dict[str, Any]]] = Field(default=[], description="Mensagens novas do contato neste turno")
+    text: Optional[str] = Field(default="", description="Texto do turno")
+    messages: Optional[List[Dict[str, Any]]] = Field(default=[], description="Mensagens novas do contato")
     history: Optional[List[Dict[str, Any]]] = Field(default=[], description="Histórico de mensagens anteriores")
     variables: Optional[Dict[str, Any]] = {}
     return_variables: Optional[List[str]] = Field(default=[], description="Variáveis que o agente pode gravar")
@@ -53,32 +54,51 @@ class GeminiAgentResponse(BaseModel):
     exit: Optional[GeminiExit] = Field(default=None, description="Saída do bloco. Null para continuar conversando")
 
 
-async def buscar_rastreios() -> str:
-    """Consulta a API de rastreios e retorna os dados formatados como texto."""
+def extrair_cep(texto: str) -> Optional[str]:
+    """Extrai o primeiro CEP válido encontrado no texto (formato 00000-000 ou 00000000)."""
+    match = re.search(r"\b(\d{5})-?(\d{3})\b", texto)
+    if match:
+        return match.group(1) + match.group(2)
+    return None
+
+
+async def consultar_cep(cep: str) -> Dict[str, Any]:
+    """Consulta o ViaCEP e retorna os dados do endereço ou uma mensagem de erro."""
     try:
         async with httpx.AsyncClient(timeout=10) as http:
-            resp = await http.get(RASTREIO_API_URL)
+            resp = await http.get(VIACEP_URL.format(cep=cep))
             if resp.status_code == 200:
                 data = resp.json()
-                rastreios = data.get("rastreios", [])
-                if not rastreios:
-                    return "Nenhum rastreio disponível no momento."
-                linhas = []
-                for r in rastreios:
-                    linhas.append(
-                        f"- Código: {r['numero_rastreio']} | Produto: {r['produto']} | "
-                        f"Status: {r['status']} | Previsão de entrega: {r['previsao_entrega']}"
-                    )
-                return "\n".join(linhas)
-            return "Serviço de rastreio indisponível no momento."
+                if data.get("erro"):
+                    return {"erro": True, "mensagem": f"CEP {cep} não encontrado na base dos Correios."}
+                return {
+                    "erro": False,
+                    "cep": data.get("cep", cep),
+                    "logradouro": data.get("logradouro", ""),
+                    "bairro": data.get("bairro", ""),
+                    "cidade": data.get("localidade", ""),
+                    "estado": data.get("uf", ""),
+                    "ibge": data.get("ibge", ""),
+                }
+            return {"erro": True, "mensagem": "Serviço de CEP indisponível no momento."}
     except Exception:
-        return "Serviço de rastreio indisponível no momento."
+        return {"erro": True, "mensagem": "Serviço de CEP indisponível no momento."}
+
+
+def formatar_dados_cep(dados: Dict[str, Any]) -> str:
+    """Formata o resultado da consulta de CEP como texto legível."""
+    if dados.get("erro"):
+        return dados.get("mensagem", "Erro ao consultar CEP.")
+    return (
+        f"CEP: {dados['cep']}\n"
+        f"Logradouro: {dados['logradouro'] or 'Não informado'}\n"
+        f"Bairro: {dados['bairro'] or 'Não informado'}\n"
+        f"Cidade: {dados['cidade']} / {dados['estado']}"
+    )
 
 
 async def processar_turno(payload: IncomingMessage) -> dict:
-    """Processa o turno (Gemini + rastreio) e devolve o dict de resultado no formato Vonix.
-    É a mesma lógica que o fluxo síncrono do main.py, isolada para reuso no callback.
-    """
+    """Processa o turno (Gemini + ViaCEP) e devolve o dict de resultado no formato Vonix."""
     # Extrai o texto da mensagem do campo text ou da última mensagem da lista
     user_message = payload.text
     if not user_message and payload.messages:
@@ -88,23 +108,29 @@ async def processar_turno(payload: IncomingMessage) -> dict:
     if not user_message:
         user_message = "Olá"
 
-    # Consulta os rastreios para incluir no contexto do agente
-    rastreios_info = await buscar_rastreios()
+    # Tenta extrair e consultar o CEP direto no texto
+    cep_encontrado = extrair_cep(user_message)
+    dados_cep = ""
+    if cep_encontrado:
+        resultado = await consultar_cep(cep_encontrado)
+        dados_cep = formatar_dados_cep(resultado)
+    else:
+        dados_cep = "Nenhum CEP foi identificado na mensagem do cliente ainda."
 
     system_instruction = """
-    Você é o assistente virtual de atendimento da 'Fake Atendimento E-commerce', uma loja virtual genérica.
-    Seu objetivo é ajudar os clientes com dúvidas sobre produtos, prazos de entrega, status de pedidos, trocas e devoluções.
+    Você é o assistente especializado em consulta de CEP da loja 'Fake Atendimento E-commerce'.
+    Seu único objetivo é ajudar o cliente a verificar se um CEP é válido, confirmar o endereço
+    correspondente e informar se realizamos entregas naquela região.
 
     Regras de Comportamento:
-    - Seja educado, prestativo e direto.
-    - Quando o cliente solicitar o catálogo de produtos, envie a mensagem: "🛍️ Aproveite nossas ofertas, nossos produtos são incríveis! Acesse nosso catálogo completo: https://catalogoa2.onrender.com/" e em seguida pergunte: "Posso te ajudar com mais alguma coisa?". Se o cliente responder que não precisa de mais nada ou demonstrar satisfação, agradeça o contato, despeça-se cordialmente.
-    - Quando o cliente demonstrar interesse em rastreio ou entrega mas não informar nenhum código, peça gentilmente o número do pedido ou código de rastreio antes de qualquer consulta.
-    - Quando o cliente informar um código de rastreio, consulte os dados de rastreio disponíveis no contexto e informe o status do pedido correspondente. Após informar, pergunte se o cliente precisa de mais alguma coisa.
-    - Se o código não estiver na lista, informe ao cliente que não foi possível localizar o pedido e que ele será direcionado a um agente humano, depois use a ferramenta 'Codigo de rastreio' no campo exit.
-    - Após informar o rastreio com sucesso e o cliente responder que não precisa de mais nada, informe que ele será direcionado para uma rápida pesquisa de satisfação e use a ferramenta 'Pesquisa' no campo exit.
-    - Quando o cliente mencionar CEP, quiser verificar se entregamos em um endereço, ou perguntar sobre frete por localidade, informe que irá transferi-lo para o nosso assistente especializado em consulta de endereço, e use a ferramenta com name 'Agente CEP' ou similar no campo exit. Marque a tag 'consulta_cep'.
-    - Marque tags relevantes no atendimento (ex: 'duvida_frete', 'troca', 'status_pedido', 'consulta_cep').
-    - Se a situação se enquadrar em uma das ferramentas disponíveis, preencha o campo 'exit' com o 'id' da ferramenta no campo 'tool' e um resumo no campo 'note'.
+    - Seja direto e objetivo. Sua especialidade é CEP e endereço.
+    - Se o cliente informar um CEP, confirme os dados de endereço retornados pela consulta.
+    - Se o CEP não for encontrado, peça gentilmente que o cliente verifique e informe novamente.
+      Se persistir, use a ferramenta 'cep nao localizado' no campo exit.
+    - Se o cliente não informou nenhum CEP ainda, solicite que informe o CEP para consulta.
+    - Após confirmar o endereço com sucesso, informe que realizamos entregas normalmente na região
+      e use a ferramenta 'Apos informar cep' no campo exit para finalizar o atendimento.
+    - Marque tags relevantes: 'consulta_cep', 'endereco_confirmado', 'cep_invalido', etc.
     - Se precisar continuar conversando, mantenha 'exit' como null.
 
     Você DEVE retornar estritamente um JSON estruturado conforme o formato pedido.
@@ -129,8 +155,10 @@ async def processar_turno(payload: IncomingMessage) -> dict:
     Variáveis Atuais: {payload.variables}
     Ferramentas Disponíveis (use o 'id' da ferramenta no campo exit.tool):
     {tools_text}
-    Dados de Rastreio Disponíveis:
-    {rastreios_info}
+
+    Resultado da Consulta de CEP:
+    {dados_cep}
+
     Histórico Recente:
     {history_text}
 
@@ -153,21 +181,21 @@ async def processar_turno(payload: IncomingMessage) -> dict:
                         system_instruction=system_instruction,
                         response_mime_type="application/json",
                         response_schema=GeminiAgentResponse,
-                        temperature=0.4,
+                        temperature=0.3,
                     ),
                 )
-                break  # Sucesso, sai do loop de tentativas
+                break
             except Exception as api_err:
                 last_error = api_err
                 error_str = str(api_err)
                 is_retryable = "503" in error_str or "UNAVAILABLE" in error_str
                 if is_retryable and attempt < max_retries - 1:
-                    delay = (2 ** attempt) * 2  # 2s, 4s
+                    delay = (2 ** attempt) * 2
                     print(f"[callback-agent][retry] {model_name} attempt {attempt + 1} failed with 503, waiting {delay}s...")
                     time.sleep(delay)
                 else:
                     print(f"[callback-agent][fallback] {model_name} failed: {error_str[:100]}")
-                    break  # Tenta o próximo modelo
+                    break
         if response:
             break
 
@@ -235,7 +263,7 @@ async def entregar_callback(callback_url: str, result: dict) -> None:
             print(f"[callback] turno indisponível (status {resp.status_code}); não será reenviado")
             return
 
-        # Falha interna do servidor: uma única re tentativa, depois desiste.
+        # Falha interna do servidor: uma única retentativa, depois desiste.
         if 500 <= resp.status_code < 600:
             print(f"[callback] erro interno {resp.status_code} na tentativa {tentativa + 1}")
             if tentativa < tentativas_max - 1:
@@ -265,15 +293,13 @@ async def processar_e_entregar(payload: IncomingMessage) -> None:
 
 @app.post("/webhook/callback")
 async def handle_callback_turn(payload: IncomingMessage, background_tasks: BackgroundTasks):
-    """Webhook do agente com fluxo de callback assíncrono.
+    """Webhook do agente CEP com fluxo de callback assíncrono.
 
-    - Se o payload traz callback_url: responde 202 imediatamente e processa em
-      background, entregando o resultado via POST para a callback_url (uso único).
-    - Se não traz callback_url: mantém o fluxo síncrono (200) para testes e
-      compatibilidade com plataformas que esperam resposta no corpo.
+    - Com callback_url: responde 202 imediatamente e processa em background,
+      entregando o resultado via POST para a callback_url (uso único, sem header de auth).
+    - Sem callback_url: mantém o fluxo síncrono (200) para testes e compatibilidade.
     """
     if payload.callback_url:
-        # A URL é usada exatamente como recebida (o token final NÃO é montado por nós).
         background_tasks.add_task(processar_e_entregar, payload)
         return Response(status_code=202)
 
@@ -289,4 +315,4 @@ async def handle_callback_turn(payload: IncomingMessage, background_tasks: Backg
 
 @app.get("/")
 def health_check():
-    return {"status": "online", "service": "Agente E-commerce - Callback"}
+    return {"status": "online", "service": "Agente CEP - Callback"}
