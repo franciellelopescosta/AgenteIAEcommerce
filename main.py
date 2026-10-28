@@ -87,11 +87,16 @@ async def handle_agent_turn(
     x_vonix_attempt: int = Header(..., description="1 na primeira tentativa, 2 na retentativa"),
 ):
     # Validação do Bearer token configurado no bloco da Vonix.
-    # Token ausente/inválido -> 401, e a Vonix manda o chat para a saída Fallback do bloco.
-    expected = f"Bearer {VONIX_TOKEN}"
-    if not VONIX_TOKEN or not secrets.compare_digest(authorization, expected):
-        print(f"[auth] token inválido recebido: {authorization[:30]!r}")
-        raise HTTPException(status_code=401, detail="Token inválido")
+    # Turnos de teste (is_test=True) são isentos de autenticação — o testador de fluxo
+    # e o botão "Testar requisição" da Vonix não enviam o header Authorization.
+    # Token ausente/inválido em turnos reais -> 401 (Vonix encaminha para saída Fallback).
+    if not payload.is_test:
+        # A Vonix pode enviar o token como "Bearer <token>" ou apenas "<token>".
+        # Normaliza removendo o prefixo antes de comparar.
+        received_token = authorization.removeprefix("Bearer ").strip()
+        if not VONIX_TOKEN or not secrets.compare_digest(received_token, VONIX_TOKEN):
+            print(f"[auth] token inválido recebido: {authorization[:30]!r}")
+            raise HTTPException(status_code=401, detail="Token inválido")
 
     # Validação do X-Vonix-Attempt (deve ser 1 ou 2 conforme o contrato).
     if x_vonix_attempt not in (1, 2):
@@ -185,7 +190,10 @@ async def handle_agent_turn(
                     break
                 try:
                     print(f"[gemini] calling {model_name}, attempt {attempt + 1}/{max_retries}")
-                    response = client.models.generate_content(
+                    # Roda a chamada síncrona do Gemini numa thread separada para
+                    # não bloquear o event loop do asyncio enquanto espera a resposta.
+                    response = await asyncio.to_thread(
+                        client.models.generate_content,
                         model=model_name,
                         contents=user_prompt,
                         config=types.GenerateContentConfig(
@@ -199,7 +207,7 @@ async def handle_agent_turn(
                 except Exception as api_err:
                     last_error = api_err
                     error_str = str(api_err)
-                    is_retryable = "503" in error_str or "UNAVAILABLE" in error_str
+                    is_retryable = "503" in error_str or "UNAVAILABLE" in error_str or "429" in error_str or "RESOURCE_EXHAUSTED" in error_str
                     if is_retryable and attempt < max_retries - 1:
                         delay = min((2 ** attempt) * 2, TIME_BUDGET - elapsed)
                         if delay <= 0:
@@ -214,8 +222,16 @@ async def handle_agent_turn(
 
         if not response:
             error_str = str(last_error) if last_error else "erro desconhecido"
-            is_retryable = "503" in error_str or "UNAVAILABLE" in error_str
-            if is_retryable:
+            is_429 = "429" in error_str or "RESOURCE_EXHAUSTED" in error_str
+            is_503 = "503" in error_str or "UNAVAILABLE" in error_str
+            if is_429:
+                # 429 -> a Vonix retenta respeitando Retry-After (se couber no tempo do bloco)
+                raise HTTPException(
+                    status_code=429,
+                    detail=str(last_error),
+                    headers={"Retry-After": "60"},
+                )
+            if is_503:
                 # 503 -> a Vonix retenta após 1s (se couber no tempo do bloco)
                 raise HTTPException(
                     status_code=503,
