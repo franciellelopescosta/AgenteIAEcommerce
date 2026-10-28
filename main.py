@@ -179,7 +179,7 @@ async def handle_agent_turn(
         TIME_BUDGET = 25
         start_time = time.monotonic()
 
-        models_to_try = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-flash-8b']
+        models_to_try = ['gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-flash']
         max_retries = 3
         response = None
         last_error = None
