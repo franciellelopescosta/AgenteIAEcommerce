@@ -1,6 +1,6 @@
 # Agente IA E-commerce
 
-Conjunto de microsserviços de atendimento conversacional integrados à plataforma **Vonix**, usando **Google Gemini** para geração de respostas em linguagem natural.
+Conjunto de microsserviços de atendimento conversacional para plataformas de chatbot, usando **Google Gemini** para geração de respostas em linguagem natural.
 
 ---
 
@@ -30,11 +30,11 @@ Agente principal de triagem. Atende dúvidas gerais dos clientes e direciona par
 - Transfere para o Agente CEP quando o cliente pergunta sobre entrega por localidade
 - Marca tags relevantes no atendimento
 
-**Autenticação:** `Authorization: <VONIX_TOKEN>` (header obrigatório em turnos reais; turnos de teste `is_test: true` são isentos)
+**Autenticação:** `Authorization: <TOKEN>` (header obrigatório em turnos reais; turnos de teste `is_test: true` são isentos)
 
 **Variáveis de ambiente:**
 ```
-VONIX_TOKEN      Token de autenticação configurado no bloco da Vonix
+WEBHOOK_TOKEN    Token de autenticação configurado na plataforma de chatbot
 GOOGLE_API_KEY   Chave da API do Google Gemini
 ```
 
@@ -127,7 +127,7 @@ Crie um arquivo `.env` ou configure as variáveis de ambiente diretamente:
 
 ```env
 GOOGLE_API_KEY=sua_chave_aqui
-VONIX_TOKEN=seu_token_aqui
+WEBHOOK_TOKEN=seu_token_aqui
 ```
 
 ---
@@ -170,13 +170,13 @@ Para subir os outros agentes no Render, crie serviços separados usando os `Proc
 | Variável | Descrição |
 |---|---|
 | `GOOGLE_API_KEY` | Chave da API do Google Gemini |
-| `VONIX_TOKEN` | Token de autenticação do bloco Vonix (apenas para o Agente Geral) |
+| `WEBHOOK_TOKEN` | Token de autenticação do webhook (apenas para o Agente Geral) |
 
 ---
 
-## Formato de resposta (Vonix)
+## Formato de resposta
 
-Todos os agentes retornam o mesmo formato esperado pela Vonix:
+Todos os agentes retornam o mesmo formato estruturado:
 
 ```json
 {
@@ -193,4 +193,4 @@ Todos os agentes retornam o mesmo formato esperado pela Vonix:
 ```
 
 - `exit: null` → cliente permanece no mesmo bloco conversando
-- `exit.tool` → deve corresponder ao `id` de uma ferramenta configurada no bloco da Vonix
+- `exit.tool` → deve corresponder ao `id` de uma ferramenta configurada no bloco do fluxo
