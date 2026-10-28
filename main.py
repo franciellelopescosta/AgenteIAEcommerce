@@ -1,7 +1,9 @@
 import os
+import secrets
 import traceback
+import asyncio
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 from google import genai
@@ -16,6 +18,10 @@ client = genai.Client()
 
 RASTREIO_API_URL = "https://api-frases-teste.onrender.com/retornorastreios"
 
+# Token de autorização configurado no bloco da Vonix (env var VONIX_TOKEN no Render).
+# A Vonix envia no header: Authorization: Bearer <VONIX_TOKEN>
+VONIX_TOKEN = os.environ.get("VONIX_TOKEN", "")
+
 
 class Contact(BaseModel):
     name: Optional[str] = None
@@ -24,18 +30,19 @@ class Contact(BaseModel):
 
 
 class IncomingMessage(BaseModel):
-    turn_id: Optional[str] = None
-    chat_id: Optional[int] = None
-    node_id: Optional[str] = None
-    channel: Optional[str] = None
-    is_test: Optional[bool] = False
-    contact: Optional[Contact] = None
-    text: Optional[str] = Field(default="", description="Textos do turno unidos por quebra de linha")
-    messages: Optional[List[Dict[str, Any]]] = Field(default=[], description="Mensagens novas do contato neste turno")
-    history: Optional[List[Dict[str, Any]]] = Field(default=[], description="Histórico de mensagens anteriores")
-    variables: Optional[Dict[str, Any]] = {}
-    return_variables: Optional[List[str]] = Field(default=[], description="Variáveis que o agente pode gravar")
-    tools: Optional[List[Dict[str, Any]]] = Field(default=[], description="Saídas permitidas neste turno")
+    # Todos os campos abaixo são obrigatórios pelo contrato da API Vonix.
+    turn_id: str = Field(description="Id do turno (igual na retentativa)")
+    chat_id: int = Field(description="Id do atendimento (use como id de sessão se o agente guarda memória)")
+    node_id: str = Field(description="Id do bloco no fluxo")
+    channel: str = Field(description="Canal do atendimento")
+    is_test: bool = Field(description="True quando o turno vem do testador de fluxo ou do botão Testar requisição")
+    contact: Contact = Field(description="Dados do contato (qualquer campo pode vir vazio)")
+    text: str = Field(description="Textos e legendas de messages unidos por quebra de linha")
+    messages: List[Dict[str, Any]] = Field(description="Mensagens novas do contato neste turno, na ordem de chegada")
+    history: List[Dict[str, Any]] = Field(description="Histórico de mensagens anteriores do atendimento atual")
+    variables: Dict[str, Any] = Field(description="Variáveis de contexto do fluxo")
+    return_variables: List[str] = Field(description="Nomes que o agente pode gravar em variables na resposta")
+    tools: List[Dict[str, Any]] = Field(description="Saídas permitidas neste turno")
 
 
 # Schema interno usado pelo Gemini para gerar a resposta estruturada
@@ -53,7 +60,7 @@ class GeminiAgentResponse(BaseModel):
 async def buscar_rastreios() -> str:
     """Consulta a API de rastreios e retorna os dados formatados como texto."""
     try:
-        async with httpx.AsyncClient(timeout=10) as http:
+        async with httpx.AsyncClient(timeout=5) as http:
             resp = await http.get(RASTREIO_API_URL)
             if resp.status_code == 200:
                 data = resp.json()
@@ -73,7 +80,33 @@ async def buscar_rastreios() -> str:
 
 
 @app.post("/webhook/ia")
-async def handle_agent_turn(payload: IncomingMessage):
+async def handle_agent_turn(
+    payload: IncomingMessage,
+    authorization: str = Header(default="", description="Token de autorização (Bearer)"),
+    x_vonix_turn_id: str = Header(..., description="Igual a turn_id. Repete-se na retentativa"),
+    x_vonix_attempt: int = Header(..., description="1 na primeira tentativa, 2 na retentativa"),
+):
+    # Validação do Bearer token configurado no bloco da Vonix.
+    # Token ausente/inválido -> 401, e a Vonix manda o chat para a saída Fallback do bloco.
+    expected = f"Bearer {VONIX_TOKEN}"
+    if not VONIX_TOKEN or not secrets.compare_digest(authorization, expected):
+        print(f"[auth] token inválido recebido: {authorization[:30]!r}")
+        raise HTTPException(status_code=401, detail="Token inválido")
+
+    # Validação do X-Vonix-Attempt (deve ser 1 ou 2 conforme o contrato).
+    if x_vonix_attempt not in (1, 2):
+        raise HTTPException(status_code=422, detail="X-Vonix-Attempt deve ser 1 ou 2")
+
+    # Loga turnos de teste (is_test=true vem do testador de fluxo ou do botão Testar requisição).
+    # Evite efeitos reais nesse caso — aqui apenas logamos, pois as chamadas externas são
+    # apenas leitura (GET na API de rastreio e geração de texto no Gemini).
+    if payload.is_test:
+        print(f"[test] turno de teste recebido (turn_id={payload.turn_id})")
+
+    # Identifica retentativa (X-Vonix-Attempt=2) para fins de observabilidade.
+    if x_vonix_attempt == 2:
+        print(f"[retry] retentativa recebida para o turno {x_vonix_turn_id}")
+
     try:
         # Extrai o texto da mensagem do campo text ou da última mensagem da lista
         user_message = payload.text
@@ -133,6 +166,11 @@ async def handle_agent_turn(payload: IncomingMessage):
         Nova Mensagem do Contato: {user_message}
         """
 
+        # Orçamento de tempo: o endpoint deve responder em até 30s.
+        # Reservamos 5s de margem para a serialização/envio da resposta HTTP.
+        TIME_BUDGET = 25
+        start_time = time.monotonic()
+
         models_to_try = ['gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite']
         max_retries = 3
         response = None
@@ -140,6 +178,11 @@ async def handle_agent_turn(payload: IncomingMessage):
 
         for model_name in models_to_try:
             for attempt in range(max_retries):
+                # Verifica se ainda há tempo dentro do orçamento de 30s
+                elapsed = time.monotonic() - start_time
+                if elapsed >= TIME_BUDGET:
+                    print(f"[timeout] orçamento de {TIME_BUDGET}s atingido, abortando retries")
+                    break
                 try:
                     print(f"[gemini] calling {model_name}, attempt {attempt + 1}/{max_retries}")
                     response = client.models.generate_content(
@@ -158,9 +201,11 @@ async def handle_agent_turn(payload: IncomingMessage):
                     error_str = str(api_err)
                     is_retryable = "503" in error_str or "UNAVAILABLE" in error_str
                     if is_retryable and attempt < max_retries - 1:
-                        delay = (2 ** attempt) * 2  # 2s, 4s
-                        print(f"[retry] {model_name} attempt {attempt + 1} failed with 503, waiting {delay}s...")
-                        time.sleep(delay)
+                        delay = min((2 ** attempt) * 2, TIME_BUDGET - elapsed)
+                        if delay <= 0:
+                            break
+                        print(f"[retry] {model_name} attempt {attempt + 1} failed, waiting {delay}s...")
+                        await asyncio.sleep(delay)
                     else:
                         print(f"[fallback] {model_name} failed: {error_str[:100]}")
                         break  # Tenta o próximo modelo
@@ -168,6 +213,16 @@ async def handle_agent_turn(payload: IncomingMessage):
                 break
 
         if not response:
+            error_str = str(last_error) if last_error else "erro desconhecido"
+            is_retryable = "503" in error_str or "UNAVAILABLE" in error_str
+            if is_retryable:
+                # 503 -> a Vonix retenta após 1s (se couber no tempo do bloco)
+                raise HTTPException(
+                    status_code=503,
+                    detail=str(last_error),
+                    headers={"Retry-After": "1"},
+                )
+            # 500/default -> Fallback sem retentativa
             raise HTTPException(status_code=500, detail=str(last_error))
 
         result_data = json.loads(response.text)
@@ -184,12 +239,13 @@ async def handle_agent_turn(payload: IncomingMessage):
 
         # Converte messages de List[str] para o formato esperado pela Vonix: {type, text}
         # Filtra mensagens vazias para evitar erro "text.body is required" no WhatsApp
+        # e limita a 10 itens (limite do contrato da API).
         if "messages" in result_data and isinstance(result_data["messages"], list):
             result_data["messages"] = [
                 {"type": "TEXT", "text": msg}
                 for msg in result_data["messages"]
                 if msg and msg.strip()
-            ]
+            ][:10]
 
         return result_data
 

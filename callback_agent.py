@@ -2,7 +2,7 @@ import traceback
 import httpx
 import re
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Dict, Any
 from google import genai
 from google.genai import types
@@ -10,7 +10,76 @@ import json
 import time
 
 
-app = FastAPI(title="Agente CEP - Callback")
+# Metadado de tags exibido no topo da documentação Swagger/ReDoc.
+tags_metadata = [
+    {
+        "name": "Webhook",
+        "description": "Endpoints de webhook para integração com a plataforma de atendimento conversacional (Vonix). "
+        "Suporta fluxo síncrono (200) e assíncrono via callback (202 + POST na `callback_url`).",
+    },
+    {
+        "name": "Health",
+        "description": "Verificação de saúde (liveness) do serviço.",
+    },
+]
+
+app_description = """
+Serviço de Agente CEP — Callback Integration
+=============================================
+
+Microsserviço de triagem e validação de endereços via CEP, integrado ao **ViaCEP** (consulta de CEP)
+e ao **Google Gemini** (resposta estruturada em linguagem natural). Projetado para se integrar a
+plataformas de atendimento conversacional (como o Vonix) em **modo síncrono ou assíncrono (callback)**.
+
+## Como funciona
+
+O agente recebe o turno (histórico + mensagem atual), extrai o CEP, consulta o ViaCEP e usa o Gemini
+para compor a resposta. A presença do campo `callback_url` define o fluxo:
+
+- **Fluxo assíncrono (202 + callback):** quando o payload traz `callback_url`, o agente responde
+  `202 Accepted` em milissegundos e processa a IA em background. Ao final, faz um `POST` do resultado
+  para a `callback_url` fornecida (uso único, sem header de autorização).
+- **Fluxo síncrono (200):** quando `callback_url` está ausente, o agente processa e devolve o resultado
+  no próprio corpo da resposta. Útil para testes e plataformas que esperam resposta imediata.
+
+## Regras de ouro da callback_url
+
+- É uma **credencial única de uso único** por turno.
+- **Sem header de autorização** — a própria URL autoriza o envio.
+- **Não deve ser persistida em logs** — use, entregue, descarte.
+- Segunda chamada retorna **409** (turno já encerrado: `already_resolved`, `expired` ou `chat_closed`).
+- O token final da URL **não é montado pelo agente** — use-a exatamente como recebida.
+
+## Ciclo de vida do turno (fluxo assíncrono)
+
+1. **`POST /webhook/callback`** com `callback_url` → resposta `202 Accepted` imediata.
+2. Processamento em background (ViaCEP + Gemini).
+3. **`POST {callback_url}`** com o resultado no formato Vonix (messages/tags/variables/exit).
+4. A plataforma valida e aplica. Em caso de erro não retratável (404/409/400/413), o turno segue
+   encerrado e o chat cai na saída **Fallback** do bloco.
+
+## Integração
+
+- **Vonix:** resposta estruturada em `{messages, tags, variables, exit}`. `exit.tool` deve bater com
+  o `id` de uma ferramenta configurada no bloco. `variables` somente grava chaves listadas em
+  `return_variables` (montado em Python, fora do schema do Gemini).
+- **ViaCEP:** `GET https://viacep.com.br/ws/{cep}/json/`.
+- **Google Gemini:** structured output via `response_schema` (modelos tentados em fallback:
+  `gemini-3.5-flash` → `gemini-3.5-flash-lite` → `gemini-3.1-flash-lite`).
+"""
+
+app = FastAPI(
+    title="Agente CEP - Callback",
+    description=app_description,
+    version="1.0.0",
+    contact={
+        "name": "Fake Atendimento E-commerce",
+        "url": "https://github.com/franciellelopescosta/AgenteIAEcommerce",
+    },
+    openapi_tags=tags_metadata,
+    docs_url="/docs",
+    redoc_url="/redoc",
+)
 
 client = genai.Client()
 
@@ -18,31 +87,100 @@ VIACEP_URL = "https://viacep.com.br/ws/{cep}/json/"
 
 
 class Contact(BaseModel):
-    name: Optional[str] = None
-    phone: Optional[str] = None
-    user_id: Optional[str] = None
+    name: Optional[str] = Field(default=None, description="Nome completo do contato", examples=["Maria da Silva"])
+    phone: Optional[str] = Field(default=None, description="Número de telefone com DDI e DDD", examples=["5567999999999"])
+    user_id: Optional[str] = Field(default=None, description="Identificador único do usuário no sistema externo", examples=["usr_12345"])
+
+    model_config = ConfigDict(json_schema_extra={
+        "example": {"name": "Maria da Silva", "phone": "5567999999999", "user_id": "usr_12345"}
+    })
 
 
 class IncomingMessage(BaseModel):
-    turn_id: Optional[str] = None
-    chat_id: Optional[int] = None
-    node_id: Optional[str] = None
-    channel: Optional[str] = None
-    is_test: Optional[bool] = False
-    contact: Optional[Contact] = None
-    text: Optional[str] = Field(default="", description="Texto do turno")
-    messages: Optional[List[Dict[str, Any]]] = Field(default=[], description="Mensagens novas do contato")
-    history: Optional[List[Dict[str, Any]]] = Field(default=[], description="Histórico de mensagens anteriores")
-    variables: Optional[Dict[str, Any]] = {}
-    return_variables: Optional[List[str]] = Field(default=[], description="Variáveis que o agente pode gravar")
-    tools: Optional[List[Dict[str, Any]]] = Field(default=[], description="Saídas permitidas neste turno")
-    callback_url: Optional[str] = Field(default=None, description="URL de callback para entregar o resultado de forma assíncrona (fluxo 202)")
+    turn_id: Optional[str] = Field(default=None, description="Identificador único do turno atual", examples=["turn_uuid_abc123"])
+    chat_id: Optional[int] = Field(default=None, description="ID numérico do chat na plataforma", examples=[987654321])
+    node_id: Optional[str] = Field(default=None, description="Identificador do bloco/nó atual no fluxo", examples=["node_cep"])
+    channel: Optional[str] = Field(default=None, description="Canal de origem do atendimento (whatsapp, web, etc.)", examples=["whatsapp"])
+    is_test: Optional[bool] = Field(default=False, description="Indica se é um turno de teste (não exige resposta real ao cliente)", examples=[False])
+    contact: Optional[Contact] = Field(default=None, description="Dados do contato que iniciou o turno")
+    text: Optional[str] = Field(default="", description="Texto do turno (mensagens do turno unidas por quebra de linha)", examples=["Qual o CEP 79002-270?"])
+    messages: Optional[List[Dict[str, Any]]] = Field(default=[], description="Mensagens novas enviadas pelo contato neste turno", examples=[[{"type": "TEXT", "text": "Qual o CEP 79002-270?"}]])
+    history: Optional[List[Dict[str, Any]]] = Field(default=[], description="Histórico de mensagens anteriores do chat (para contexto da IA)", examples=[[{"role": "contact", "text": "Olá"}, {"role": "agent", "text": "Olá! Como posso ajudar?"}]])
+    variables: Optional[Dict[str, Any]] = Field(default={}, description="Variáveis de contexto ativas no fluxo", examples=[{"protocolo": "A-991"}])
+    return_variables: Optional[List[str]] = Field(default=[], description="Lista de variáveis que o agente tem permissão de gravar (ex.: 'note')", examples=[["note"]])
+    tools: Optional[List[Dict[str, Any]]] = Field(default=[], description="Lista de ferramentas/saídas permitidas neste turno (use o campo `id` da ferramenta em `exit.tool`)", examples=[[{"id": "tool_apos_cep", "name": "Apos informar cep", "type": "transfer", "description": "Finalizar atendimento após confirmar endereço"}]])
+    callback_url: Optional[str] = Field(
+        default=None,
+        description="URL de callback exclusiva (token único) para entrega assíncrona. Quando presente, ativa o fluxo 202. Use-a exatamente como recebida — o token final não é montado pelo agente.",
+        examples=["https://api.plataforma.com/chats/agent/callback/4f7a2c1e-9b3d-4c2a-8e1f-7a6b5c4d3e2f"],
+    )
+
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "turn_id": "turn-8842",
+            "chat_id": 1023,
+            "contact": {"name": "Maria", "phone": "5511999990000"},
+            "text": "Vocês entregam no CEP 79002-270?",
+            "messages": [{"type": "TEXT", "text": "Vocês entregam no CEP 79002-270?"}],
+            "history": [],
+            "variables": {},
+            "return_variables": ["note"],
+            "tools": [
+                {"id": "tool_apos_cep", "name": "Apos informar cep", "type": "transfer", "description": "Finalizar após confirmar endereço"},
+                {"id": "tool_cep_invalido", "name": "cep nao localizado", "type": "transfer", "description": "CEP não encontrado"}
+            ],
+            "callback_url": "https://api.vonix.com/flows/turn/4f7a2c1e-9b3d-4c2a-8e1f-7a6b5c4d3e2f/callback"
+        }
+    })
+
+
+# Modelos de resposta expostos no Swagger (formato Vonix que a plataforma espera de volta).
+# São distintos dos schemas internos usados pelo Gemini (GeminiAgentResponse), que usam
+# messages: List[str] (texto puro). A conversão List[str] -> List[{type, text}] acontece em Python.
+class ResponseMessage(BaseModel):
+    type: str = Field(description="Tipo da mensagem (sempre 'TEXT' para texto)", examples=["TEXT"])
+    text: str = Field(description="Conteúdo textual da mensagem a ser enviada ao contato", examples=["Boa, Maria! O CEP 79002-270 corresponde a Campo Grande/MS."])
+
+    model_config = ConfigDict(json_schema_extra={
+        "example": {"type": "TEXT", "text": "Boa, Maria! O CEP 79002-270 corresponde a Campo Grande/MS."}
+    })
+
+
+class ResponseExit(BaseModel):
+    tool: Optional[str] = Field(default=None, description="ID da ferramenta de saída (deve bater com o `id` de uma tool enviada no payload)", examples=["tool_apos_cep"])
+    note: Optional[str] = Field(default=None, description="Resumo do caso, injetado na variável `note` quando solicitado via `return_variables`", examples=["CEP 79002-270 confirmado, entrega disponível"])
+
+    model_config = ConfigDict(json_schema_extra={
+        "example": {"tool": "tool_apos_cep", "note": "CEP 79002-270 confirmado, entrega disponível"}
+    })
+
+
+class AgentResponse(BaseModel):
+    messages: List[ResponseMessage] = Field(description="Mensagens a enviar ao contato (máx. 10 itens, na ordem de exibição). Mensagens vazias são filtradas para evitar erros no WhatsApp.")
+    tags: Optional[List[str]] = Field(default=[], description="Tags a marcar no atendimento. Tag vazia invalida toda a resposta.", examples=[["consulta_cep", "endereco_confirmado"]])
+    variables: Optional[Dict[str, Any]] = Field(default=None, description="Variáveis a gravar no fluxo (somente chaves listadas em `return_variables` são salvas; valores devem ser string/número/booleano — null/lista/objeto invalidam)", examples=[{"note": "CEP 79002-270 confirmado"}])
+    exit: Optional[ResponseExit] = Field(default=None, description="Saída do bloco. Null = o cliente continua no mesmo bloco conversando.")
+
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "messages": [{"type": "TEXT", "text": "Boa, Maria! O CEP 79002-270 corresponde a Campo Grande/MS. Entregamos normalmente na região. Precisa de mais alguma coisa?"}],
+            "tags": ["consulta_cep", "endereco_confirmado"],
+            "exit": None
+        }
+    })
+
+
+class ErrorResponse(BaseModel):
+    detail: str = Field(description="Descrição do erro ocorrido", examples=["Internal Server Error"])
+
+    model_config = ConfigDict(json_schema_extra={"example": {"detail": "Internal Server Error"}})
 
 
 # Schema interno usado pelo Gemini para gerar a resposta estruturada.
 # IMPORTANTE: o campo "variables" NÃO pode estar neste schema — Dict[str, Any]
 # é incompatível com o structured output do Gemini (INVALID_ARGUMENT).
 # Ele é montado em Python, depois da resposta, a partir de return_variables.
+# Estes modelos NÃO são expostos no Swagger (uso interno apenas).
 class GeminiExit(BaseModel):
     tool: Optional[str] = Field(default=None, description="ID da ferramenta de saída (tool.id)")
     note: Optional[str] = Field(default=None, description="Resumo do caso para transferência ou encerramento")
@@ -291,7 +429,58 @@ async def processar_e_entregar(payload: IncomingMessage) -> None:
         traceback.print_exc()
 
 
-@app.post("/webhook/callback")
+@app.post(
+    "/webhook/callback",
+    response_model=AgentResponse,
+    tags=["Webhook"],
+    summary="Webhook do Agente CEP (fluxo síncrono 200 ou assíncrono 202 + callback)",
+    description="""
+Recebe o turno enviado pela plataforma (Vonix) e processa via ViaCEP + Gemini.
+
+## Decisão de fluxo baseada em `callback_url`
+
+- **Com `callback_url`** → responde `202 Accepted` imediatamente e processa em background.
+  O resultado é entregue via `POST` para a `callback_url` (uso único, sem header de auth).
+- **Sem `callback_url`** → processa de forma síncrona e retorna o resultado no corpo (`200 OK`).
+
+## Regras de ouro da `callback_url`
+
+- Credencial única de uso único por turno (segunda chamada → **409**).
+- Sem header de autorização — a própria URL autoriza.
+- Não persistir em logs — use, entregue, descarte.
+- Use exatamente como recebida (o token final não é montado pelo agente).
+
+## Resposta assíncrona (POST na callback_url)
+
+O corpo enviado à `callback_url` segue o mesmo `AgentResponse` (messages/tags/variables/exit).
+Em caso de erro não retratável (404/409/400/413), o turno segue encerrado e o chat cai na saída
+**Fallback** do bloco.
+""",
+    responses={
+        200: {
+            "description": "Resposta síncrona (fluxo sem `callback_url`): payload processado retornado no corpo.",
+            "model": AgentResponse,
+        },
+        202: {
+            "description": "Turno aceito para processamento em background (fluxo com `callback_url`). "
+            "O resultado será entregue via POST à `callback_url`. O corpo da resposta é vazio.",
+        },
+        400: {
+            "description": "Corpo JSON inválido ou malformado. **Não retentar** — corrija a estrutura do payload enviado.",
+            "model": ErrorResponse,
+        },
+        413: {
+            "description": "Corpo da requisição acima de 1 MB. **Não retentar** — reduza o array de mensagens/histórico.",
+            "model": ErrorResponse,
+        },
+        500: {
+            "description": "Falha interna (ex.: Gemini indisponível após fallback). No fluxo de callback, o agente "
+            "faz no máximo 1 retry com backoff no envio à callback_url em caso de 5xx/erro de rede. "
+            "Atenção: um novo envio **não reabre** o turno (ele segue encerrado).",
+            "model": ErrorResponse,
+        },
+    },
+)
 async def handle_callback_turn(payload: IncomingMessage, background_tasks: BackgroundTasks):
     """Webhook do agente CEP com fluxo de callback assíncrono.
 
@@ -313,6 +502,11 @@ async def handle_callback_turn(payload: IncomingMessage, background_tasks: Backg
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/")
+@app.get(
+    "/",
+    tags=["Health"],
+    summary="Health check",
+    description="Verifica se o serviço está online. Útil para probes de liveness no Render.",
+)
 def health_check():
     return {"status": "online", "service": "Agente CEP - Callback"}
