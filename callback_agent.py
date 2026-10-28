@@ -1,4 +1,5 @@
 import traceback
+import asyncio
 import httpx
 import re
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Response
@@ -303,6 +304,12 @@ async def processar_turno(payload: IncomingMessage) -> dict:
     Nova Mensagem do Contato: {user_message}
     """
 
+    # Orçamento de tempo: no fluxo síncrono o endpoint deve responder em até 30s.
+    # Reservamos 5s de margem. No fluxo assíncrono (callback) o limite é maior,
+    # mas o orçamento ainda evita loops longos desnecessários.
+    TIME_BUDGET = 25
+    start_time = time.monotonic()
+
     models_to_try = ['gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite']
     max_retries = 3
     response = None
@@ -310,9 +317,17 @@ async def processar_turno(payload: IncomingMessage) -> dict:
 
     for model_name in models_to_try:
         for attempt in range(max_retries):
+            # Verifica se ainda há tempo dentro do orçamento
+            elapsed = time.monotonic() - start_time
+            if elapsed >= TIME_BUDGET:
+                print(f"[callback-agent][timeout] orçamento de {TIME_BUDGET}s atingido, abortando retries")
+                break
             try:
                 print(f"[callback-agent][gemini] calling {model_name}, attempt {attempt + 1}/{max_retries}")
-                response = client.models.generate_content(
+                # Roda a chamada síncrona do Gemini numa thread separada para
+                # não bloquear o event loop do asyncio.
+                response = await asyncio.to_thread(
+                    client.models.generate_content,
                     model=model_name,
                     contents=user_prompt,
                     config=types.GenerateContentConfig(
@@ -326,11 +341,13 @@ async def processar_turno(payload: IncomingMessage) -> dict:
             except Exception as api_err:
                 last_error = api_err
                 error_str = str(api_err)
-                is_retryable = "503" in error_str or "UNAVAILABLE" in error_str
+                is_retryable = "503" in error_str or "UNAVAILABLE" in error_str or "429" in error_str or "RESOURCE_EXHAUSTED" in error_str
                 if is_retryable and attempt < max_retries - 1:
-                    delay = (2 ** attempt) * 2
-                    print(f"[callback-agent][retry] {model_name} attempt {attempt + 1} failed with 503, waiting {delay}s...")
-                    time.sleep(delay)
+                    delay = min((2 ** attempt) * 2, TIME_BUDGET - elapsed)
+                    if delay <= 0:
+                        break
+                    print(f"[callback-agent][retry] {model_name} attempt {attempt + 1} failed, waiting {delay}s...")
+                    await asyncio.sleep(delay)
                 else:
                     print(f"[callback-agent][fallback] {model_name} failed: {error_str[:100]}")
                     break
@@ -338,6 +355,21 @@ async def processar_turno(payload: IncomingMessage) -> dict:
             break
 
     if not response:
+        error_str = str(last_error) if last_error else "erro desconhecido"
+        is_429 = "429" in error_str or "RESOURCE_EXHAUSTED" in error_str
+        is_503 = "503" in error_str or "UNAVAILABLE" in error_str
+        if is_429:
+            raise HTTPException(
+                status_code=429,
+                detail=str(last_error),
+                headers={"Retry-After": "60"},
+            )
+        if is_503:
+            raise HTTPException(
+                status_code=503,
+                detail=str(last_error),
+                headers={"Retry-After": "1"},
+            )
         raise HTTPException(status_code=500, detail=str(last_error))
 
     result_data = json.loads(response.text)
@@ -387,7 +419,7 @@ async def entregar_callback(callback_url: str, result: dict) -> None:
             # Log sem expor a URL (credencial do turno).
             print(f"[callback] erro de rede na entrega: {type(e).__name__}")
             if tentativa < tentativas_max - 1:
-                time.sleep(2)
+                await asyncio.sleep(2)
                 continue
             return
 
@@ -405,7 +437,7 @@ async def entregar_callback(callback_url: str, result: dict) -> None:
         if 500 <= resp.status_code < 600:
             print(f"[callback] erro interno {resp.status_code} na tentativa {tentativa + 1}")
             if tentativa < tentativas_max - 1:
-                time.sleep(2)
+                await asyncio.sleep(2)
                 continue
             return
 
