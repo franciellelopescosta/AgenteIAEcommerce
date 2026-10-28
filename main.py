@@ -94,8 +94,11 @@ async def handle_agent_turn(
         # A Vonix pode enviar o token como "Bearer <token>" ou apenas "<token>".
         # Normaliza removendo o prefixo antes de comparar.
         received_token = authorization.removeprefix("Bearer ").strip()
-        if not VONIX_TOKEN or not secrets.compare_digest(received_token, VONIX_TOKEN):
-            print(f"[auth] token inválido recebido: {authorization[:30]!r}")
+        print(f"[auth] token recebido (completo): {received_token!r}")
+        print(f"[auth] token esperado (completo): {VONIX_TOKEN!r}")
+        print(f"[auth] match: {received_token == VONIX_TOKEN}")
+        if not VONIX_TOKEN or received_token != VONIX_TOKEN:
+            print(f"[auth] FALHOU - lens: recebido={len(received_token)} esperado={len(VONIX_TOKEN)}")
             raise HTTPException(status_code=401, detail="Token inválido")
 
     # Validação do X-Vonix-Attempt (deve ser 1 ou 2 conforme o contrato).
@@ -176,7 +179,7 @@ async def handle_agent_turn(
         TIME_BUDGET = 25
         start_time = time.monotonic()
 
-        models_to_try = ['gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite']
+        models_to_try = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-flash-8b']
         max_retries = 3
         response = None
         last_error = None
